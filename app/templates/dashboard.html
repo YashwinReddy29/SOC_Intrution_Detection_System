@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SOC Dashboard</title>
+
+    <!-- Bootstrap -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Socket.io -->
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+</head>
+
+<body class="bg-dark text-light">
+
+<nav class="navbar navbar-dark bg-black px-3">
+    <span class="navbar-brand">AI SOC Dashboard</span>
+    <div>
+        <span class="me-3">Logged in as {{ session['user'] }}</span>
+        <a href="/export_csv" class="btn btn-info btn-sm me-2">Download CSV</a>
+        <a href="/logout" class="btn btn-danger btn-sm">Logout</a>
+    </div>
+</nav>
+
+<div class="container-fluid mt-3">
+
+    <!-- METRIC CARDS -->
+    <div class="row mb-3">
+        <div class="col-md-3">
+            <div class="card bg-danger text-white text-center p-3">
+                <h5>Risk Score</h5>
+                <h3 id="riskCard">{{ risk }}</h3>
+            </div>
+        </div>
+
+        <div class="col-md-3">
+            <div class="card bg-warning text-dark text-center p-3">
+                <h5>Threat Score</h5>
+                <h3 id="threatCard">{{ threat }}</h3>
+            </div>
+        </div>
+
+        <div class="col-md-3">
+            <div class="card bg-info text-dark text-center p-3">
+                <h5>Total Logs</h5>
+                <h3 id="logCard">{{ logs|length }}</h3>
+            </div>
+        </div>
+
+        <div class="col-md-3">
+            <div class="card bg-success text-white text-center p-3">
+                <h5>Status</h5>
+                <h3>Active</h3>
+            </div>
+        </div>
+    </div>
+
+    <!-- ATTACK COUNTS -->
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <div class="card bg-dark p-3">
+                <h5>Brute Force Attempts</h5>
+                <h3 id="bruteCard">{{ brute_force_count }}</h3>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="card bg-dark p-3">
+                <h5>DDoS Attempts</h5>
+                <h3 id="ddosCard">{{ ddos_count }}</h3>
+            </div>
+        </div>
+    </div>
+
+    <!-- CHARTS -->
+    <div class="row mb-4">
+        <div class="col-md-6">
+            <div class="card bg-secondary p-3">
+                <h5>Risk Score Trend</h5>
+                <canvas id="riskChart"></canvas>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="card bg-secondary p-3">
+                <h5>Attack Distribution</h5>
+                <canvas id="attackChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- ALERTS + MAP -->
+    <div class="row">
+        <div class="col-md-6">
+            <h5>Recent Alerts</h5>
+            <ul id="alerts" class="list-group">
+                {% for log in logs %}
+                    <li class="list-group-item bg-secondary text-light">
+                        {{ log[1] }}
+                    </li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="col-md-6">
+            <h5>Live Attack Map</h5>
+            <div id="map" style="height:400px;"></div>
+        </div>
+    </div>
+
+</div>
+
+<!-- Leaflet JS MUST be before heat plugin -->
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<!-- Heatmap plugin AFTER Leaflet -->
+<script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+
+<script>
+// Patch Leaflet canvas to prevent Chrome warning
+const originalCreateElement = document.createElement;
+document.createElement = function(type) {
+    const element = originalCreateElement.call(document, type);
+    if (type === "canvas") {
+        const ctx = element.getContext("2d", { willReadFrequently: true });
+    }
+    return element;
+};
+</script>
+
+
+<script>
+
+/////////////////////////////
+// MAP INITIALIZATION
+/////////////////////////////
+
+L.Canvas.prototype._initContainer = function () {
+    this._container = document.createElement('canvas');
+    this._container.willReadFrequently = true;
+    this._container.style.position = 'absolute';
+};
+
+var map = L.map('map').setView([20, 0], 2);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors'
+}).addTo(map);
+
+var heatPoints = [];
+var heat = L.heatLayer(heatPoints, {
+    radius: 25,
+    pane: 'overlayPane'
+}).addTo(map);
+
+/////////////////////////////
+// CHART INITIALIZATION
+/////////////////////////////
+
+var riskData = {{ risk_trend|tojson }};
+var bruteForce = {{ brute_force_count }};
+var ddos = {{ ddos_count }};
+var normal = {{ normal_count }};
+
+// Risk Chart
+var ctx1 = document.getElementById('riskChart').getContext('2d');
+var riskChart = new Chart(ctx1, {
+    type: 'line',
+    data: {
+        labels: riskData.map((_, i) => i + 1),
+        datasets: [{
+            label: 'Risk Score',
+            data: riskData,
+            borderColor: 'red',
+            backgroundColor: 'rgba(255,0,0,0.2)',
+            tension: 0.4
+        }]
+    }
+});
+
+// Attack Distribution
+var ctx2 = document.getElementById('attackChart').getContext('2d');
+var attackChart = new Chart(ctx2, {
+    type: 'bar',
+    data: {
+        labels: ['Brute Force', 'DDoS', 'Normal'],
+        datasets: [{
+            data: [bruteForce, ddos, normal],
+            backgroundColor: ['red', 'orange', 'green']
+        }]
+    }
+});
+
+/////////////////////////////
+// SOCKET.IO REAL-TIME
+/////////////////////////////
+
+var socket = io();
+
+socket.on("connect", function() {
+    console.log("WebSocket Connected");
+});
+
+socket.on("new_attack", function(data) {
+    heatPoints.push([data.lat, data.lon, 0.8]);
+    heat.setLatLngs(heatPoints);
+
+    L.circleMarker([data.lat, data.lon], {
+        radius: 6,
+        color: "red",
+        fillOpacity: 0.7
+    }).addTo(map);
+});
+
+socket.on("new_alert", function(data) {
+    var alertList = document.getElementById("alerts");
+    var item = document.createElement("li");
+    item.className = "list-group-item bg-danger text-white";
+    item.innerText = data.message;
+    alertList.prepend(item);
+});
+
+socket.on("metrics_update", function(data) {
+
+    // Update Cards
+    document.getElementById("riskCard").innerText = data.risk;
+    document.getElementById("threatCard").innerText = data.threat;
+    document.getElementById("bruteCard").innerText = data.brute_force;
+    document.getElementById("ddosCard").innerText = data.ddos;
+
+    // Update Charts
+    attackChart.data.datasets[0].data = [
+        data.brute_force,
+        data.ddos,
+        data.normal
+    ];
+    attackChart.update();
+
+    riskChart.data.labels = data.risk_trend.map((_, i) => i + 1);
+    riskChart.data.datasets[0].data = data.risk_trend;
+    riskChart.update();
+});
+
+</script>
+
+</body>
+</html>
