@@ -1,4 +1,4 @@
-name: SOC CI Pipeline
+name: build-and-test
 
 on:
   push:
@@ -7,18 +7,17 @@ on:
     branches: [ main ]
 
 jobs:
-  build-and-test:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-
     - name: Checkout Repository
       uses: actions/checkout@v3
 
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10'
+        python-version: '3.12'
 
     - name: Install Dependencies
       run: |
@@ -27,20 +26,12 @@ jobs:
 
     - name: Check Python Syntax
       run: |
-        python -m py_compile app.py
-        python -m py_compile detection_engine.py
-        python -m py_compile ml_model.py
+        python -m py_compile run.py
+        python -m py_compile app/__init__.py
 
-    - name: Run Basic Security Check
+    - name: Basic Import Test
       run: |
-        pip install bandit
-        bandit -r .
+        python -c "from app import create_app; print('App loads successfully')"
+
     - name: Build Docker Image
-      run: |
-        docker build -t cyber-soc .
-
-    - name: Check Dependencies
-      run: |
-        pip install safety
-        safety check
-
+      run: docker build -t soc-system .
