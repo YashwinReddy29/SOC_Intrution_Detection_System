@@ -79,16 +79,12 @@ def _attack_session(
     """Create one temporally correlated attack session."""
     primary_source = _private_ip(rng)
 
-    # DDoS uses multiple stable source identities. Other attacks use one source
-    # so source-level rolling behavior is meaningful.
     sources = (
         [_private_ip(rng) for _ in range(min(12, max(3, count // 8)))]
         if attack_type == "ddos"
         else [primary_source]
     )
 
-    # Stable source geolocation for ordinary traffic. Exfiltration deliberately
-    # shifts location after the first event to create a geographic-anomaly signal.
     source_latitude = rng.gauss(39.5, 3.0)
     source_longitude = rng.gauss(-98.5, 8.0)
 
@@ -116,7 +112,7 @@ def _attack_session(
                 {
                     "destination_port": 22,
                     "protocol": "TCP",
-                    "failed_logins": rng.randint(1, 4),
+                    "failed_logins": 1,
                     "bytes_in": rng.randint(150, 700),
                     "bytes_out": rng.randint(50, 400),
                 }
@@ -127,7 +123,7 @@ def _attack_session(
                 {
                     "destination_port": 443,
                     "protocol": "HTTPS",
-                    "failed_logins": rng.randint(1, 3),
+                    "failed_logins": 1,
                     "bytes_in": rng.randint(300, 1200),
                     "bytes_out": rng.randint(100, 600),
                 }
@@ -176,13 +172,12 @@ def _attack_session(
 
 
 def _distribute_counts(total: int, buckets: int) -> List[int]:
-    """Split a count as evenly as possible across buckets."""
     base, remainder = divmod(total, buckets)
     return [base + (1 if i < remainder else 0) for i in range(buckets)]
 
 
 def generate_dataset(config: GeneratorConfig | None = None) -> pd.DataFrame:
-    """Generate a reproducible 30-day SOC dataset with stable temporal splits."""
+    """Generate a reproducible 30-day dataset with interleaved attack traffic."""
     config = config or GeneratorConfig()
 
     if config.total_events < 100:
@@ -200,9 +195,6 @@ def generate_dataset(config: GeneratorConfig | None = None) -> pd.DataFrame:
     end = start + timedelta(days=config.duration_days)
     total_seconds = (end - start).total_seconds()
 
-    # Use the exact same event-count proportions as the 70/15/15 chronological
-    # evaluator, preventing a class-composition artifact at split boundaries.
-    split_total = _distribute_counts(config.total_events, 100)
     train_events = int(config.total_events * 0.70)
     val_events = int(config.total_events * 0.15)
     test_events = config.total_events - train_events - val_events
@@ -225,21 +217,23 @@ def generate_dataset(config: GeneratorConfig | None = None) -> pd.DataFrame:
 
     events: List[dict] = []
 
-    period_starts = [start]
-    period_starts.append(start + timedelta(seconds=total_seconds * 0.70))
-    period_starts.append(start + timedelta(seconds=total_seconds * 0.85))
+    period_starts = [
+        start,
+        start + timedelta(seconds=total_seconds * 0.70),
+        start + timedelta(seconds=total_seconds * 0.85),
+    ]
     period_ends = [
         period_starts[1],
         period_starts[2],
         end,
     ]
 
-    # Normal behavior is present throughout all three chronological periods.
     for period_index in range(3):
         period_start = period_starts[period_index]
         period_end = period_ends[period_index]
         period_seconds = max((period_end - period_start).total_seconds(), 1.0)
 
+        # Normal traffic is distributed throughout every chronological period.
         for _ in range(split_normal_counts[period_index]):
             offset = rng.uniform(0, period_seconds - 1)
             timestamp = period_start + timedelta(seconds=offset)
@@ -256,21 +250,17 @@ def generate_dataset(config: GeneratorConfig | None = None) -> pd.DataFrame:
                 )
             )
 
-        # Every chronological period receives every attack family in an even
-        # mix. This avoids validation/test drift caused by session ordering.
-        for attack_type, type_count in zip(
-            ATTACK_TYPES,
-            _distribute_counts(split_attack_counts[period_index], len(ATTACK_TYPES)),
-        ):
+        # Every period receives all five attack families in the same proportions.
+        attack_by_type = _distribute_counts(
+            split_attack_counts[period_index], len(ATTACK_TYPES)
+        )
+        for attack_type, type_count in zip(ATTACK_TYPES, attack_by_type):
             remaining = type_count
-            session_index = 0
             while remaining > 0:
                 session_size = min(remaining, rng.randint(20, 50))
-                # Leave enough room for the complete burst within the period.
-                latest_offset = max(period_seconds - 600, 1.0)
+                latest_offset = max(period_seconds - 900, 1.0)
                 offset = rng.uniform(0, latest_offset)
                 session_start = period_start + timedelta(seconds=offset)
-
                 events.extend(
                     _attack_session(
                         rng,
@@ -280,13 +270,8 @@ def generate_dataset(config: GeneratorConfig | None = None) -> pd.DataFrame:
                     )
                 )
                 remaining -= session_size
-                session_index += 1
 
-    df = (
-        pd.DataFrame(events)
-        .sort_values("timestamp")
-        .reset_index(drop=True)
-    )
+    df = pd.DataFrame(events).sort_values("timestamp").reset_index(drop=True)
 
     if len(df) != config.total_events:
         raise RuntimeError(
