@@ -14,15 +14,16 @@ from ml.feature_extractor import FEATURE_COLUMNS
 
 
 class MLService:
-    """Production-oriented wrapper around an Isolation Forest artifact."""
+    """Production-oriented wrapper around a persisted Isolation Forest."""
 
-    VERSION = "2.0.0"
+    VERSION = "2.1.0"
 
     def __init__(self, artifact_path: str = "ml/models/isolation_forest.joblib"):
         self.artifact_path = Path(artifact_path)
         self.model: Optional[IsolationForest] = None
         self.threshold: float = 0.0
         self.feature_columns = FEATURE_COLUMNS.copy()
+        self.feature_stats = {"time_mean": 12.0, "time_std": 4.0}
 
     def train(self, features: pd.DataFrame, labels: Optional[pd.Series] = None) -> dict:
         """Train only on normal examples and return training metadata."""
@@ -49,11 +50,17 @@ class MLService:
             "features": self.feature_columns,
         }
 
+    def set_feature_stats(self, time_mean: float, time_std: float) -> None:
+        """Persist training-time statistics required by live feature extraction."""
+        self.feature_stats = {
+            "time_mean": float(time_mean),
+            "time_std": float(time_std) if float(time_std) > 0 else 1.0,
+        }
+
     def anomaly_scores(self, features: pd.DataFrame) -> np.ndarray:
         if self.model is None:
             raise RuntimeError("Model has not been trained or loaded")
         X = features[self.feature_columns].astype(float)
-        # Isolation Forest: lower decision_function means more anomalous.
         return -self.model.decision_function(X)
 
     def set_threshold(self, threshold: float) -> None:
@@ -73,13 +80,21 @@ class MLService:
                 "model": self.model,
                 "threshold": self.threshold,
                 "feature_columns": self.feature_columns,
+                "feature_stats": self.feature_stats,
                 "version": self.VERSION,
             },
             self.artifact_path,
         )
 
     def load(self) -> None:
+        if not self.artifact_path.exists():
+            raise FileNotFoundError(f"Model artifact not found: {self.artifact_path}")
+
         artifact = joblib.load(self.artifact_path)
         self.model = artifact["model"]
         self.threshold = float(artifact["threshold"])
-        self.feature_columns = artifact["feature_columns"]
+        self.feature_columns = artifact.get("feature_columns", FEATURE_COLUMNS.copy())
+        self.feature_stats = artifact.get(
+            "feature_stats",
+            {"time_mean": 12.0, "time_std": 4.0},
+        )
