@@ -1,14 +1,14 @@
 """Run the leakage-safe v2 SOC ML experiment end-to-end.
 
-The dataset is generated across 30 days with normal and attack traffic interleaved.
-Splits are chronological, while rolling features are computed once over the full
-ordered stream so online feature state is causal (current event + prior events only).
+Usage:
+    python -m scripts.run_ml_experiment
 """
 
 from pathlib import Path
 import json
 
 import pandas as pd
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 from ml.eval_metrics import benchmark_scorer, evaluate, save_metrics, tune_threshold
 from ml.feature_extractor import RollingFeatureExtractor
@@ -22,8 +22,32 @@ MODEL_PATH = ROOT / "ml" / "models" / "isolation_forest.joblib"
 REPORT_PATH = ROOT / "ml" / "reports" / "ml_metrics_v2.json"
 
 
+def _distribution(frame: pd.DataFrame) -> dict:
+    return frame["label"].value_counts().sort_index().to_dict()
+
+
+def _attack_breakdown(frame: pd.DataFrame, predictions) -> dict:
+    """Calculate recall/F1 for each attack family in the test period."""
+    labels = frame["label"].astype(int).reset_index(drop=True)
+    attack_types = frame["attack_type"].reset_index(drop=True)
+    predictions = pd.Series(predictions).reset_index(drop=True)
+
+    result = {}
+    for attack_type in sorted(attack_types[attack_types != "normal"].unique()):
+        mask = attack_types == attack_type
+        y_true = labels[mask]
+        y_pred = predictions[mask]
+        result[attack_type] = {
+            "count": int(mask.sum()),
+            "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+            "recall": float(recall_score(y_true, y_pred, zero_division=0)),
+            "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+        }
+    return result
+
+
 def main():
-    print("[1/6] Generating 10,000 realistic temporal SOC events...")
+    print("[1/7] Generating 10,000 realistic temporal SOC events...")
     DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -36,7 +60,7 @@ def main():
     save_dataset(df, str(DATA_PATH))
     print(df["label"].value_counts().sort_index().to_dict())
 
-    print("[2/6] Creating chronological train/validation/test periods...")
+    print("[2/7] Creating chronological train/validation/test periods...")
     n = len(df)
     train_end = int(n * 0.70)
     val_end = int(n * 0.85)
@@ -45,26 +69,29 @@ def main():
     val_df = df.iloc[train_end:val_end].copy()
     test_df = df.iloc[val_end:].copy()
 
+    print(f"Train={len(train_df)}, Validation={len(val_df)}, Test={len(test_df)}")
+    print(f"Train labels: {_distribution(train_df)}")
+    print(f"Validation labels: {_distribution(val_df)}")
+    print(f"Test labels: {_distribution(test_df)}")
     print(
-        f"Train={len(train_df)}, Validation={len(val_df)}, Test={len(test_df)}"
+        "Validation attack families:",
+        val_df.loc[val_df["label"] == 1, "attack_type"].value_counts().sort_index().to_dict(),
+    )
+    print(
+        "Test attack families:",
+        test_df.loc[test_df["label"] == 1, "attack_type"].value_counts().sort_index().to_dict(),
     )
 
     for name, frame in [("Train", train_df), ("Validation", val_df), ("Test", test_df)]:
-        counts = frame["label"].value_counts().sort_index().to_dict()
-        print(f"{name} labels: {counts}")
-        if set(counts.keys()) != {0, 1}:
-            raise ValueError(
-                f"{name} period must contain both normal and attack events: {counts}"
+        if not ((frame["label"] == 0).any() and (frame["label"] == 1).any()):
+            raise RuntimeError(
+                f"{name} period must contain both normal and attack events"
             )
 
-    print("[3/6] Building rolling behavioral features in time order...")
+    print("[3/7] Building rolling behavioral features in time order...")
     extractor = RollingFeatureExtractor(window_seconds=300)
     train_normal_timestamps = train_df.loc[train_df["label"] == 0, "timestamp"]
     extractor.fit_time_statistics(train_normal_timestamps)
-
-    # Causal rolling features are computed once over the ordered event stream.
-    # For any row, the extractor only has access to the current event and prior
-    # events in the rolling state.
     features = extractor.transform(df, reset=True)
     labels = df["label"].astype(int).reset_index(drop=True)
 
@@ -75,23 +102,19 @@ def main():
     X_test = features.iloc[val_end:].reset_index(drop=True)
     y_test = labels.iloc[val_end:].reset_index(drop=True)
 
-    print("[4/6] Training Isolation Forest on NORMAL training traffic only...")
+    print("[4/7] Training Isolation Forest on NORMAL training traffic only...")
     service = MLService(str(MODEL_PATH))
     train_info = service.train(X_train, y_train)
 
     val_scores = service.anomaly_scores(X_val)
-    selected, target_met = tune_threshold(
-        y_val,
-        val_scores,
-        min_precision=0.89,
-    )
+    selected, target_met = tune_threshold(y_val, val_scores, min_precision=0.89)
     service.set_threshold(selected["threshold"])
 
     print("Validation operating point:")
     print(json.dumps(selected, indent=2))
     print(f"89% precision target met: {target_met}")
 
-    print("[5/6] Evaluating untouched chronological test period...")
+    print("[5/7] Evaluating untouched chronological test period...")
     test_scores = service.anomaly_scores(X_test)
     test_predictions = (test_scores >= service.threshold).astype(int)
     latencies = benchmark_scorer(service, X_test)
@@ -120,6 +143,7 @@ def main():
             "validation_f1": selected["f1"],
             "precision_target_met_on_validation": target_met,
             "split_strategy": "chronological_70_15_15",
+            "attack_family_metrics_test": _attack_breakdown(test_df, test_predictions),
             "model_version": service.VERSION,
         }
     )
@@ -127,7 +151,10 @@ def main():
     service.save()
     save_metrics(metrics, str(REPORT_PATH))
 
-    print("[6/6] Final TEST metrics")
+    print("[6/7] Per-attack TEST metrics")
+    print(json.dumps(metrics["attack_family_metrics_test"], indent=2))
+
+    print("[7/7] Final TEST metrics")
     print(json.dumps(metrics, indent=2))
     print(f"\nSaved dataset: {DATA_PATH}")
     print(f"Saved model:   {MODEL_PATH}")
