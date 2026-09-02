@@ -1,7 +1,8 @@
 """Run the leakage-safe v2 SOC ML experiment end-to-end.
 
-Usage:
-    python -m scripts.run_ml_experiment
+The dataset is generated across 30 days with normal and attack traffic interleaved.
+Splits are chronological, while rolling features are computed once over the full
+ordered stream so online feature state is causal (current event + prior events only).
 """
 
 from pathlib import Path
@@ -105,6 +106,7 @@ def main():
     print("[4/7] Training Isolation Forest on NORMAL training traffic only...")
     service = MLService(str(MODEL_PATH))
     train_info = service.train(X_train, y_train)
+    service.set_feature_stats(extractor.time_mean, extractor.time_std)
 
     val_scores = service.anomaly_scores(X_val)
     selected, target_met = tune_threshold(y_val, val_scores, min_precision=0.89)
