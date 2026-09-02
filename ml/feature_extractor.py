@@ -1,13 +1,9 @@
-"""Behavioral feature extraction for SOC events.
-
-Features are computed from rolling source/global state so they represent behavior
-across a time window rather than isolated log-row values.
-"""
+"""Causal rolling behavioral features for the SOC anomaly detector."""
 
 from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
-from math import log2, radians, sin, cos, asin, sqrt
+from math import asin, cos, log2, radians, sin, sqrt
 from typing import Iterable
 
 import numpy as np
@@ -26,7 +22,12 @@ FEATURE_COLUMNS = [
 
 
 class RollingFeatureExtractor:
-    """Extract seven behavioral features using a configurable rolling window."""
+    """Extract seven behavioral features from a causal rolling time window.
+
+    The extractor processes events in chronological order. Every feature for an
+    event is calculated from that event plus events already observed in the
+    rolling window; future events never contribute to a row's features.
+    """
 
     def __init__(self, window_seconds: int = 300):
         if window_seconds <= 0:
@@ -35,15 +36,16 @@ class RollingFeatureExtractor:
         self.window_seconds = window_seconds
         self.source_events = defaultdict(deque)
         self.global_events = deque()
-        self.last_location = {}
+        self.baseline_location: dict[str, tuple[float, float]] = {}
         self.time_mean = 12.0
         self.time_std = 4.0
 
     @staticmethod
-    def _entropy(values: Iterable[str]) -> float:
+    def _entropy(values: Iterable[str | int]) -> float:
         values = list(values)
         if not values:
             return 0.0
+
         counts = Counter(values)
         total = len(values)
         return float(
@@ -54,27 +56,29 @@ class RollingFeatureExtractor:
     def _distance(lat1, lon1, lat2, lon2) -> float:
         if any(pd.isna(v) for v in [lat1, lon1, lat2, lon2]):
             return 0.0
-        lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+
+        lat1, lon1, lat2, lon2 = map(
+            radians, [lat1, lon1, lat2, lon2]
+        )
         dlat = lat2 - lat1
         dlon = lon2 - lon1
         a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
         return float(6371.0 * 2 * asin(sqrt(min(1.0, a))))
 
     def fit_time_statistics(self, timestamps: pd.Series) -> None:
+        """Fit time-of-day mean/std using training timestamps only."""
         parsed = pd.to_datetime(timestamps, utc=True)
         hours = parsed.dt.hour + parsed.dt.minute / 60.0
         self.time_mean = float(hours.mean())
         self.time_std = float(hours.std(ddof=0)) or 1.0
 
     def _purge(self, timestamp: pd.Timestamp) -> None:
-        """Remove rolling-window entries older than the current event."""
         cutoff = timestamp.timestamp() - self.window_seconds
 
         while self.global_events and self.global_events[0][0] < cutoff:
             self.global_events.popleft()
 
         for source, events in list(self.source_events.items()):
-            # Timestamps are stored as Unix floats for efficient comparison.
             while events and events[0][0] < cutoff:
                 events.popleft()
             if not events:
@@ -82,69 +86,102 @@ class RollingFeatureExtractor:
 
     def transform_event(self, event: dict) -> dict:
         timestamp = pd.to_datetime(event["timestamp"], utc=True)
-        if not isinstance(timestamp, pd.Timestamp):
-            timestamp = pd.Timestamp(timestamp)
-
         source = str(event["source_ip"])
         self._purge(timestamp)
 
-        source_history = self.source_events[source]
-        global_sources = [item[1]["source_ip"] for item in self.global_events]
-
-        # Store timestamps consistently as Unix floats in both rolling queues.
         event_timestamp = timestamp.timestamp()
+        source_history = self.source_events[source]
+
+        # Score with current event + prior window events, then append current
+        # event so future rows can use it. This keeps the feature causal.
+        prior_source_events = [item[1] for item in source_history]
+        prior_global_events = [item[1] for item in self.global_events]
+
+        source_context = prior_source_events + [event]
+        global_context = prior_global_events + [event]
+
+        total_source = len(source_context)
+        destination_ips = [str(e["destination_ip"]) for e in source_context]
+        destination_ports = [int(e["destination_port"]) for e in source_context]
+        protocols = [str(e["protocol"]) for e in source_context]
+
+        failed_attempts = sum(
+            max(0, int(e.get("failed_logins", 0))) for e in source_context
+        )
+        source_event_count = max(total_source, 1)
+
+        bytes_in = sum(
+            max(0, int(e.get("bytes_in", 0))) for e in source_context
+        )
+        bytes_out = sum(
+            max(0, int(e.get("bytes_out", 0))) for e in source_context
+        )
+
+        # 1. Source entropy: destination diversity generated by this source.
+        # High entropy indicates the source is spreading activity across many
+        # destinations instead of repeatedly contacting one destination.
+        destination_entropy = self._entropy(destination_ips)
+        unique_destinations = len(set(destination_ips))
+        max_entropy = max(log2(max(unique_destinations, 2)), 1.0)
+        source_entropy = destination_entropy / max_entropy
+
+        # 2. Port diversity: log-scaled number of unique destination ports.
+        # Using count rather than unique/total avoids penalizing long scan
+        # sessions as their number of observed ports grows.
+        unique_ports = len(set(destination_ports))
+        port_diversity = float(np.log1p(unique_ports))
+
+        # 3. Failed-login rate: failed attempts per source event.
+        # With one authentication attempt per generated event this is a true
+        # bounded rate; if a real log aggregates multiple attempts, it still
+        # behaves as an attempts-per-event intensity measure.
+        failed_login_rate = float(
+            min(failed_attempts / source_event_count, 1.0)
+        )
+
+        # 4. Bytes in/out ratio. Positive values mean outbound traffic dominates.
+        bytes_in_out_ratio = float(
+            np.log1p(bytes_out) - np.log1p(bytes_in)
+        )
+
+        # 5. Time-of-day z-score based only on training statistics.
+        hour = timestamp.hour + timestamp.minute / 60.0
+        time_z = float(abs((hour - self.time_mean) / self.time_std))
+
+        # 6. Protocol count used by the source in the rolling window.
+        protocol_count = float(len(set(protocols)))
+
+        # 7. Geographic distance from the source's first observed baseline.
+        lat = event.get("latitude")
+        lon = event.get("longitude")
+        distance = 0.0
+
+        if not pd.isna(lat) and not pd.isna(lon):
+            if source not in self.baseline_location:
+                self.baseline_location[source] = (float(lat), float(lon))
+            baseline = self.baseline_location[source]
+            distance = self._distance(
+                baseline[0], baseline[1], float(lat), float(lon)
+            )
+
         source_history.append((event_timestamp, event))
         self.global_events.append((event_timestamp, event))
 
-        source_events = [item[1] for item in source_history]
-        total_source = max(len(source_events), 1)
-
-        ports = {e["destination_port"] for e in source_events}
-        protocols = {e["protocol"] for e in source_events}
-        failed = sum(int(e.get("failed_logins", 0)) for e in source_events)
-        auth_events = sum(
-            1 for e in source_events if int(e.get("failed_logins", 0)) > 0
-        )
-        bytes_in = sum(max(0, int(e.get("bytes_in", 0))) for e in source_events)
-        bytes_out = sum(max(0, int(e.get("bytes_out", 0))) for e in source_events)
-
-        hour = timestamp.hour + timestamp.minute / 60.0
-        time_z = abs((hour - self.time_mean) / self.time_std)
-
-        previous = self.last_location.get(source)
-        distance = 0.0
-        if previous:
-            distance = self._distance(
-                previous[0],
-                previous[1],
-                event.get("latitude"),
-                event.get("longitude"),
-            )
-        self.last_location[source] = (
-            event.get("latitude"),
-            event.get("longitude"),
-        )
-
-        # Normalize source entropy by the maximum entropy in the current window.
-        entropy = self._entropy(global_sources + [source])
-        unique_sources = max(len(set(global_sources + [source])), 1)
-        max_entropy = max(log2(unique_sources), 1.0)
-
         return {
-            "source_entropy": entropy / max_entropy,
-            "port_diversity": len(ports) / total_source,
-            "failed_login_rate": failed / max(auth_events, 1),
-            "bytes_in_out_ratio": np.log1p(bytes_out) - np.log1p(bytes_in),
+            "source_entropy": float(source_entropy),
+            "port_diversity": port_diversity,
+            "failed_login_rate": failed_login_rate,
+            "bytes_in_out_ratio": bytes_in_out_ratio,
             "time_of_day_zscore": time_z,
-            "protocol_count": float(len(protocols)),
-            "geographic_distance": distance,
+            "protocol_count": protocol_count,
+            "geographic_distance": float(distance),
         }
 
     def transform(self, df: pd.DataFrame, reset: bool = True) -> pd.DataFrame:
         if reset:
             self.source_events.clear()
             self.global_events.clear()
-            self.last_location.clear()
+            self.baseline_location.clear()
 
         frame = df.copy()
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
