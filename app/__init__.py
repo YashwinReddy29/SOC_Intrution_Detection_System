@@ -5,7 +5,7 @@ socketio = SocketIO(cors_allowed_origins="*", async_mode="gevent")
 
 
 def create_app():
-    """Create the Flask application without a polling-based SOC loop."""
+    """Create the Flask application with event-driven ML detection."""
     app = Flask(__name__)
     app.config["SECRET_KEY"] = "supersecretkey"
 
@@ -14,10 +14,12 @@ def create_app():
 
     socketio.init_app(app)
 
-    from app.controllers.main_controller import main_bp
+    # The clean dashboard controller replaces the legacy controller that
+    # contained the 3-second polling loop and toy ML training.
+    from app.controllers.realtime_controller import realtime_bp
     from app.controllers.ml_controller import ml_bp
 
-    app.register_blueprint(main_bp)
+    app.register_blueprint(realtime_bp)
     app.register_blueprint(ml_bp)
 
     return app
