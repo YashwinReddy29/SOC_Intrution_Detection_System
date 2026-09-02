@@ -1,7 +1,8 @@
-"""Run the v2 SOC ML experiment with leakage-safe temporal evaluation.
+"""Run the leakage-safe v2 SOC ML experiment end-to-end.
 
-Usage:
-    python -m scripts.run_ml_experiment
+The dataset is generated across 30 days with normal and attack traffic interleaved.
+Splits are chronological, while rolling features are computed once over the full
+ordered stream so online feature state is causal (current event + prior events only).
 """
 
 from pathlib import Path
@@ -48,15 +49,22 @@ def main():
         f"Train={len(train_df)}, Validation={len(val_df)}, Test={len(test_df)}"
     )
 
+    for name, frame in [("Train", train_df), ("Validation", val_df), ("Test", test_df)]:
+        counts = frame["label"].value_counts().sort_index().to_dict()
+        print(f"{name} labels: {counts}")
+        if set(counts.keys()) != {0, 1}:
+            raise ValueError(
+                f"{name} period must contain both normal and attack events: {counts}"
+            )
+
     print("[3/6] Building rolling behavioral features in time order...")
     extractor = RollingFeatureExtractor(window_seconds=300)
-
-    # Fit time-of-day statistics using NORMAL TRAINING traffic only.
     train_normal_timestamps = train_df.loc[train_df["label"] == 0, "timestamp"]
     extractor.fit_time_statistics(train_normal_timestamps)
 
-    # Build features once, sequentially, so validation/test can use only prior
-    # events as rolling context. No future event is available to a past row.
+    # Causal rolling features are computed once over the ordered event stream.
+    # For any row, the extractor only has access to the current event and prior
+    # events in the rolling state.
     features = extractor.transform(df, reset=True)
     labels = df["label"].astype(int).reset_index(drop=True)
 
@@ -103,6 +111,10 @@ def main():
             "train_size": int(len(train_df)),
             "validation_size": int(len(val_df)),
             "test_size": int(len(test_df)),
+            "validation_attack_count": int(y_val.sum()),
+            "validation_normal_count": int((y_val == 0).sum()),
+            "test_attack_count": int(y_test.sum()),
+            "test_normal_count": int((y_test == 0).sum()),
             "validation_precision": selected["precision"],
             "validation_recall": selected["recall"],
             "validation_f1": selected["f1"],
