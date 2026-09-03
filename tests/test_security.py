@@ -4,10 +4,11 @@ from app.security import InMemoryRateLimiter, valid_api_key
 
 
 def test_api_key_comparison() -> None:
-    assert valid_api_key(None, None)
-    assert valid_api_key("secret", "secret")
-    assert not valid_api_key("wrong", "secret")
+    assert not valid_api_key(None, None)
+    assert not valid_api_key("secret", None)
     assert not valid_api_key(None, "secret")
+    assert not valid_api_key("wrong", "secret")
+    assert valid_api_key("secret", "secret")
 
 
 def test_rate_limiter_blocks_after_limit() -> None:

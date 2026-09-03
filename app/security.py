@@ -45,11 +45,13 @@ class InMemoryRateLimiter:
 
 
 def valid_api_key(candidate: str | None, expected: str | None) -> bool:
-    """Constant-time API-key comparison; missing expected key disables auth."""
-    if not expected:
-        return True
-    if not candidate:
+    """Validate an API key using a constant-time comparison.
+
+    Authentication fails closed when no expected key is configured.
+    """
+    if not candidate or not expected:
         return False
+
     return hmac.compare_digest(
         hashlib.sha256(candidate.encode()).digest(),
         hashlib.sha256(expected.encode()).digest(),

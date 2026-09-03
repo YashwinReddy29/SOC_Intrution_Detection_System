@@ -60,14 +60,29 @@ def test_health_endpoint() -> None:
     assert "threshold" in payload
 
 
-def test_event_endpoint_scores_and_returns_detection(monkeypatch, sample_event: dict) -> None:
+def test_event_endpoint_scores_and_returns_detection(
+    monkeypatch,
+    sample_event: dict,
+) -> None:
+    monkeypatch.setenv("ML_API_KEY", "test-api-key")
+
     app = create_app()
     client = app.test_client()
 
-    monkeypatch.setattr("app.controllers.ml_controller.threat_score", lambda _ip: 0)
-    monkeypatch.setattr("app.controllers.ml_controller.insert_log", lambda *_args: None)
+    monkeypatch.setattr(
+        "app.controllers.ml_controller.threat_score",
+        lambda _ip: 0,
+    )
+    monkeypatch.setattr(
+        "app.controllers.ml_controller.insert_log",
+        lambda *_args: None,
+    )
 
-    response = client.post("/api/ml/events", json=sample_event)
+    response = client.post(
+        "/api/ml/events",
+        json=sample_event,
+        headers={"X-API-Key": "test-api-key"},
+    )
 
     assert response.status_code == 200
     payload = response.get_json()
@@ -78,7 +93,9 @@ def test_event_endpoint_scores_and_returns_detection(monkeypatch, sample_event: 
     assert payload["detection"]["latency_ms"] >= 0
 
 
-def test_event_validation_reports_missing_fields() -> None:
+def test_event_validation_reports_missing_fields(monkeypatch) -> None:
+    monkeypatch.setenv("ML_API_KEY", "test-api-key")
+
     app = create_app()
     client = app.test_client()
 
@@ -95,6 +112,7 @@ def test_event_validation_reports_missing_fields() -> None:
             "latitude": 40.7128,
             "longitude": -74.0060,
         },
+        headers={"X-API-Key": "test-api-key"},
     )
 
     assert response.status_code == 400
@@ -104,7 +122,10 @@ def test_event_validation_reports_missing_fields() -> None:
 
 def test_socketio_test_client_can_connect() -> None:
     app = create_app()
-    client = socketio.test_client(app, flask_test_client=app.test_client())
+    client = socketio.test_client(
+        app,
+        flask_test_client=app.test_client(),
+    )
 
     assert client.is_connected()
     client.disconnect()
