@@ -19,6 +19,7 @@ numpy==2.4.2
 pandas==3.0.0
 pillow==12.1.1
 PyJWT==2.11.0
+pytest==8.4.2
 python-dateutil==2.9.0.post0
 python-engineio==4.13.1
 python-socketio==5.16.1
