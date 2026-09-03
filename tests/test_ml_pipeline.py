@@ -64,7 +64,6 @@ def test_event_endpoint_scores_and_returns_detection(monkeypatch, sample_event: 
     app = create_app()
     client = app.test_client()
 
-    # Keep this API test independent from external threat-intelligence services.
     monkeypatch.setattr("app.controllers.ml_controller.threat_score", lambda _ip: 0)
     monkeypatch.setattr("app.controllers.ml_controller.insert_log", lambda *_args: None)
 
@@ -77,6 +76,30 @@ def test_event_endpoint_scores_and_returns_detection(monkeypatch, sample_event: 
     assert set(payload["detection"]["features"]) == set(FEATURE_COLUMNS)
     assert isinstance(payload["detection"]["detected"], bool)
     assert payload["detection"]["latency_ms"] >= 0
+
+
+def test_event_validation_reports_missing_fields() -> None:
+    app = create_app()
+    client = app.test_client()
+
+    response = client.post(
+        "/api/ml/events",
+        json={
+            "timestamp": "2026-01-15T12:00:00+00:00",
+            "source_ip": "10.10.10.10",
+            "destination_port": 443,
+            "protocol": "HTTPS",
+            "bytes_in": 1000,
+            "bytes_out": 500,
+            "failed_logins": 0,
+            "latitude": 40.7128,
+            "longitude": -74.0060,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "destination_ip" in response.get_json()["error"]
+    assert response.get_json()["request_id"]
 
 
 def test_socketio_test_client_can_connect() -> None:
