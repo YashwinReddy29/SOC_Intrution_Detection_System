@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from app.models.database import insert_log
 from app.services.threat_service import threat_score
 from app import socketio
+from app.security import valid_api_key
 
 from ml.detection_service import DetectionService
 
@@ -33,6 +34,10 @@ def ml_health():
 @ml_bp.route("/events", methods=["POST"])
 def ingest_event():
     """Score one SOC event and emit the result immediately."""
+    expected_key = current_app.config.get("ML_API_KEY")
+    if not valid_api_key(request.headers.get("X-API-Key"), expected_key):
+        return jsonify({"error": "Unauthorized"}), 401
+
     event = request.get_json(silent=True)
     if not isinstance(event, dict):
         return jsonify({"error": "Request body must be a JSON object"}), 400
@@ -41,8 +46,8 @@ def ingest_event():
         result = detector.analyze(event)
     except (ValueError, TypeError, KeyError) as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": f"Detection service failure: {exc}"}), 500
+    except Exception:
+        return jsonify({"error": "Detection service failure"}), 500
 
     ip = str(event["source_ip"])
     try:
