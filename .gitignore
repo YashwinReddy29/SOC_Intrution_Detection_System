@@ -2,15 +2,18 @@
 __pycache__/
 *.pyc
 
-# Virtual environment
+# Virtual environments
 venv/
+.venv/
 
 # Database
 soc.db
 
-# Generated files
+# Generated data and reports
 analytics.csv
 *.csv
+ml/reports/*.json
+ml/models/*.joblib
 
 # OS
 .DS_Store
@@ -21,3 +24,8 @@ analytics.csv
 
 # Logs
 *.log
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
