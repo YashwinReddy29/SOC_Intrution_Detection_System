@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from time import perf_counter
 
 import pandas as pd
@@ -28,11 +27,7 @@ class DetectionResult:
 
 
 class DetectionService:
-    """Long-lived detector for event-driven inference.
-
-    The same rolling feature state is retained between events, while the model
-    artifact is loaded once at application startup.
-    """
+    """Long-lived detector for event-driven inference."""
 
     VERSION = "2.1.0"
 
@@ -50,17 +45,50 @@ class DetectionService:
         required = {
             "timestamp",
             "source_ip",
+            "destination_ip",
+            "source_port",
             "destination_port",
             "protocol",
             "bytes_in",
             "bytes_out",
             "failed_logins",
+            "country",
             "latitude",
             "longitude",
         }
         missing = sorted(required - set(event))
         if missing:
             raise ValueError(f"Missing required event fields: {', '.join(missing)}")
+
+        numeric_fields = (
+            "source_port",
+            "destination_port",
+            "bytes_in",
+            "bytes_out",
+            "failed_logins",
+            "latitude",
+            "longitude",
+        )
+        for field in numeric_fields:
+            value = event[field]
+            if isinstance(value, bool):
+                raise ValueError(f"Event field '{field}' must be numeric")
+            try:
+                float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Event field '{field}' must be numeric") from exc
+
+        latitude = float(event["latitude"])
+        longitude = float(event["longitude"])
+        if not -90.0 <= latitude <= 90.0:
+            raise ValueError("Event field 'latitude' must be between -90 and 90")
+        if not -180.0 <= longitude <= 180.0:
+            raise ValueError("Event field 'longitude' must be between -180 and 180")
+
+        for field in ("source_port", "destination_port", "failed_logins"):
+            value = float(event[field])
+            if value < 0 or not value.is_integer():
+                raise ValueError(f"Event field '{field}' must be a non-negative integer")
 
     def analyze(self, event: dict) -> DetectionResult:
         start = perf_counter()
