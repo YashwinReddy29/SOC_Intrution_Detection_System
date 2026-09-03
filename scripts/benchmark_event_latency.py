@@ -82,6 +82,14 @@ def event_key(event: dict[str, Any]) -> str:
     )
 
 
+def prepare_event(row: Any) -> dict[str, Any]:
+    """Convert a pandas row into JSON-safe API input."""
+    event = row.to_dict()
+    if hasattr(event.get("timestamp"), "isoformat"):
+        event["timestamp"] = event["timestamp"].isoformat()
+    return event
+
+
 def wait_for_socket_event(
     tracker: SocketTracker,
     key: str,
@@ -170,7 +178,7 @@ def main() -> None:
 
     print(f"Warming up with {args.warmup} events...")
     for _, row in df.iloc[: args.warmup].iterrows():
-        event = row.to_dict()
+        event = prepare_event(row)
         response = session.post(events_url, json=event, timeout=5)
         response.raise_for_status()
 
@@ -179,7 +187,7 @@ def main() -> None:
 
     measured = df.iloc[args.warmup : args.warmup + args.samples]
     for index, (_, row) in enumerate(measured.iterrows(), start=1):
-        event = row.to_dict()
+        event = prepare_event(row)
         key = event_key(event)
         started = time.perf_counter()
 
