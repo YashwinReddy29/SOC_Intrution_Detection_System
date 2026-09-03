@@ -2,7 +2,7 @@ name: build-and-test
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, production-ml-upgrade ]
   pull_request:
     branches: [ main ]
 
@@ -12,12 +12,13 @@ jobs:
 
     steps:
     - name: Checkout Repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.12'
+        cache: 'pip'
 
     - name: Install Dependencies
       run: |
@@ -27,11 +28,19 @@ jobs:
     - name: Check Python Syntax
       run: |
         python -m py_compile run.py
-        python -m py_compile app/__init__.py
+        python -m compileall -q app ml scripts tests
+
+    - name: Generate ML Model Artifact
+      run: |
+        PYTHONPATH=. python scripts/run_ml_experiment.py
+
+    - name: Run Automated Tests
+      run: |
+        PYTHONPATH=. pytest -q
 
     - name: Basic Import Test
       run: |
-        python -c "from app import create_app; print('App loads successfully')"
+        PYTHONPATH=. python -c "from app import create_app; print('App loads successfully')"
 
     - name: Build Docker Image
       run: docker build -t soc-system .
