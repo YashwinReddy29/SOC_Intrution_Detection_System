@@ -1,22 +1,26 @@
 import json
 import logging
+import os
 import time
 import uuid
 
 from flask import Flask, g, jsonify, request
 from flask_socketio import SocketIO
 
-socketio = SocketIO(cors_allowed_origins="*", async_mode="gevent")
+socketio = SocketIO(
+    cors_allowed_origins=os.getenv("SOCKETIO_CORS_ORIGINS", "*").split(","),
+    async_mode="gevent",
+)
 logger = logging.getLogger("soc")
 
 
 def create_app():
     """Create the Flask application with event-driven ML detection."""
     app = Flask(__name__)
-    app.config["SECRET_KEY"] = "supersecretkey"
+    app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "development-only-change-me")
     app.config["MAX_CONTENT_LENGTH"] = 64 * 1024
 
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(message)s")
 
     @app.before_request
     def attach_request_context():
@@ -27,7 +31,10 @@ def create_app():
     def add_request_headers(response):
         request_id = getattr(g, "request_id", "unknown")
         response.headers["X-Request-ID"] = request_id
-        duration_ms = (time.perf_counter() - getattr(g, "request_started", time.perf_counter())) * 1000.0
+        duration_ms = (
+            time.perf_counter()
+            - getattr(g, "request_started", time.perf_counter())
+        ) * 1000.0
         logger.info(json.dumps({
             "request_id": request_id,
             "method": request.method,
