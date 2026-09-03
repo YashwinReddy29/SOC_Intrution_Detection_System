@@ -1,23 +1,10 @@
-"""Benchmark end-to-end ML event ingestion and Socket.IO alert latency.
-
-Run the Flask application first, then execute:
-    python scripts/benchmark_event_latency.py
-
-The benchmark measures:
-- HTTP latency: POST /api/ml/events request/response time.
-- Socket latency: time from POST start until the matching detection_event
-  is received by a Socket.IO client.
-- Server ML latency: latency_ms returned by DetectionService.
-
-Events are generated in chronological order from the same synthetic stream
-used by the ML experiment. A warm-up period populates rolling feature state
-before measured events are sent.
-"""
+"""Benchmark end-to-end ML event ingestion and Socket.IO alert latency."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import threading
 import time
@@ -67,8 +54,6 @@ class SocketTracker:
 
 
 def event_key(event: dict[str, Any]) -> str:
-    # The event itself is echoed in detection_event, so this is stable without
-    # changing the application contract just for benchmarking.
     return json.dumps(
         {
             "timestamp": str(event["timestamp"]),
@@ -134,6 +119,13 @@ def main() -> None:
     health_url = f"{args.base_url.rstrip('/')}/api/ml/health"
     events_url = f"{args.base_url.rstrip('/')}/api/ml/events"
 
+    ml_api_key = os.getenv("ML_API_KEY")
+    headers = {"X-API-Key": ml_api_key} if ml_api_key else {}
+    if ml_api_key:
+        print("ML API authentication: enabled")
+    else:
+        print("ML API authentication: disabled")
+
     try:
         health = session.get(health_url, timeout=5)
         health.raise_for_status()
@@ -179,7 +171,12 @@ def main() -> None:
     print(f"Warming up with {args.warmup} events...")
     for _, row in df.iloc[: args.warmup].iterrows():
         event = prepare_event(row)
-        response = session.post(events_url, json=event, timeout=5)
+        response = session.post(events_url, json=event, headers=headers, timeout=5)
+        if response.status_code == 401:
+            raise SystemExit(
+                "API returned 401. ML_API_KEY is configured on the server, but the "
+                "benchmark process does not have the same ML_API_KEY."
+            )
         response.raise_for_status()
 
     measurements: list[Measurement] = []
@@ -191,8 +188,13 @@ def main() -> None:
         key = event_key(event)
         started = time.perf_counter()
 
-        response = session.post(events_url, json=event, timeout=5)
+        response = session.post(events_url, json=event, headers=headers, timeout=5)
         http_done = time.perf_counter()
+        if response.status_code == 401:
+            raise SystemExit(
+                "API returned 401 during measurement. Check that the benchmark's "
+                "ML_API_KEY matches the server's ML_API_KEY."
+            )
         response.raise_for_status()
         payload = response.json()
 
@@ -261,6 +263,7 @@ def main() -> None:
         "samples": len(measurements),
         "warmup": args.warmup,
         "socket_matches": len(socket_values),
+        "api_key_auth_enabled": bool(ml_api_key),
         "http_ms": {
             "mean": statistics.mean(http_values),
             "p50": percentile(http_values, 50),
